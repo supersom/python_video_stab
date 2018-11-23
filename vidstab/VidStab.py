@@ -21,8 +21,12 @@ import numpy as np
 import imutils
 import imutils.feature.factories as kp_factory
 import matplotlib.pyplot as plt
-from . import general_utils
-from . import vidstab_utils
+# from . import general_utils
+# from . import vidstab_utils
+# import general_utils
+# import vidstab_utils
+from vidstab import general_utils
+from vidstab import vidstab_utils
 
 
 class VidStab:
@@ -53,7 +57,7 @@ class VidStab:
     :ivar transforms: a 2d numpy array storing the transformations used from frame to frame
     """
 
-    def __init__(self, kp_method='GFTT', *args, **kwargs):
+    def __init__(self, kp_method='GFTT', stab_algo='mean', *args, **kwargs):
         """instantiate VidStab class
 
         :param kp_method: String of the type of keypoint detector to use. Available options are:
@@ -75,6 +79,8 @@ class VidStab:
         else:
             self.kp_detector = kp_factory.FeatureDetector_create(kp_method, *args, **kwargs)
 
+        self.stab_algo = stab_algo
+
         self._smoothing_window = None
         self._raw_transforms = []
         self._trajectory = []
@@ -92,6 +98,8 @@ class VidStab:
         self.extreme_frame_corners = {'min_x': 0, 'min_y': 0, 'max_x': 0, 'max_y': 0}
         self.frame_corners = None
 
+        self.avg_transformed_frame = None
+
     def _update_prev_frame(self, current_frame_gray):
         self.prev_gray = current_frame_gray[:]
         self.prev_kps = self.kp_detector.detect(self.prev_gray)
@@ -103,6 +111,23 @@ class VidStab:
         else:
             # gen cumsum for new row and append
             self._trajectory.append([self._trajectory[-1][j] + x for j, x in enumerate(transform)])
+
+    def _update_raw_transform(self, transform):
+        # if not self._raw_transforms:
+        #     self._raw_transforms.append(transform[:])
+        # else:
+        #     # gen cumsum for new row and append
+        #     self._raw_transforms.append([self._raw_transforms[-1][j] + x for j, x in enumerate(transform)])
+        # print("self.stab_algo:",self.stab_algo)
+        if self.stab_algo == 'mean':
+            self._raw_transforms.append(transform[:])
+        elif self.stab_algo == 'raw':
+            # print("_update_raw_transform::stab_algo:",self.stab_algo)
+            if not self._raw_transforms:
+                self._raw_transforms.append(transform[:])
+            else:
+                # gen cumsum for new row and append
+                self._raw_transforms.append([self._raw_transforms[-1][j] + x for j, x in enumerate(transform)])
 
     def _set_extreme_corners(self, frame):
         h, w = frame.shape[:2]
@@ -154,7 +179,7 @@ class VidStab:
 
         # update previous frame info for next iteration
         self._update_prev_frame(current_frame_gray)
-        self._raw_transforms.append(transform_i[:])
+        self._update_raw_transform(transform_i)
         self._update_trajectory(transform_i)
 
     def _init_trajectory(self, smoothing_window, max_frames, gen_all=False, show_progress=False):
@@ -232,6 +257,19 @@ class VidStab:
         else:
             neg_border_size = 0
 
+        live_video = 0
+        frame_width = int(self.vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        # print("frame width: ",frame_width)
+        frame_height = int(self.vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # print("frame height: ",frame_height)
+        if int(self.vid_cap.get(cv2.CAP_PROP_FRAME_COUNT)) == -1: # live video
+            live_video = 1
+            input_writer = cv2.VideoWriter(output_path[:-4]+'_input.avi',cv2.VideoWriter_fourcc(*output_fourcc),
+                int(self.vid_cap.get(cv2.CAP_PROP_FPS)), (frame_width, frame_height), True)
+
+        self.avg_input_frame = np.zeros((frame_height,frame_width))
+        self.avg_transformed_frame = np.zeros((frame_height,frame_width))
+
         grabbed_frame = True
         prev_frame = None
         while len(self.frame_queue) > 0 or grabbed_frame:
@@ -240,14 +278,22 @@ class VidStab:
 
             grabbed_frame, next_frame = self.vid_cap.read()
             if grabbed_frame:
+                if live_video:
+                    input_writer.write(next_frame)
                 self.frame_queue.append(next_frame)
-                self.frame_queue_inds.append(self.frame_queue_inds[-1] + 1)
+                if not self.frame_queue_inds:
+                    self.frame_queue_inds.append(0)
+                else:
+                    self.frame_queue_inds.append(self.frame_queue_inds[-1] + 1)
                 self._gen_next_raw_transform()
                 self._gen_transforms(smoothing_window=smoothing_window)
 
             i = self.frame_queue_inds.popleft()
             frame_i = self.frame_queue.popleft()
             transform_i = self.transforms[i, :]
+
+            frame_i_gray = cv2.cvtColor(frame_i, cv2.COLOR_RGB2GRAY)
+            self.avg_input_frame+=frame_i_gray
 
             if i >= max_frames:
                 break
@@ -257,6 +303,7 @@ class VidStab:
 
             bordered_frame, border_mode = vidstab_utils.border_frame(frame_i, border_size, border_type)
 
+            print("\ntransform:\n",transform)
             transformed = cv2.warpAffine(bordered_frame,
                                          transform,
                                          bordered_frame.shape[:2][::-1],
@@ -271,27 +318,47 @@ class VidStab:
                 auto_h = math.ceil(transformed.shape[0] - 1 - (buffer - self.extreme_frame_corners['max_y']))
                 transformed = transformed[auto_y:auto_y + auto_h, auto_x:auto_x + auto_w]
 
+            # drop alpha layer of image
+            transformed = transformed[:, :, :3]
+
+            transformed_gray = cv2.cvtColor(transformed, cv2.COLOR_RGB2GRAY)
+            self.avg_transformed_frame+=transformed_gray
+
+            if playback:
+                # show live camera frame
+                if grabbed_frame:
+                    resized_input_frame = imutils.resize(next_frame, width=min([next_frame.shape[0], 1000]))
+                    cv2.imshow('VidStab camera live input (press Q or ESC to quit)',resized_input_frame)
+
+                if prev_frame is not None:
+                    # show dequeued frame, before transform
+                    resized_prev_frame = imutils.resize(prev_frame, width=min([prev_frame.shape[0], 1000]))
+                    cv2.imshow('VidStab prev input (press Q or ESC to quit)',resized_prev_frame)
+
+                bordered_frame = bordered_frame[:,:,:3]
+                # show dequeued frame, before transform
+                resized_dequeued_frame = imutils.resize(bordered_frame, width=min([bordered_frame.shape[0], 1000]))
+                cv2.imshow('VidStab dequeued input (press Q or ESC to quit)',resized_dequeued_frame)
+
+                # show transformed frame
+                resized_transformed = imutils.resize(transformed, width=min([transformed.shape[0], 1000]))
+                # resized_transformed = resized_transformed[200:frame_i.shape[0]-200,200:frame_i.shape[1]-200,:]
+                cv2.imshow('VidStab transformed ({} frame delay if using live video;'
+                           ' press Q or ESC to quit)'.format(min([smoothing_window,max_frames])),resized_transformed)
+
+                resized_diff = imutils.resize(abs(bordered_frame-transformed), width=min([bordered_frame.shape[0], 1000]))
+                cv2.imshow('VidStab diff input vs. transformed (press Q or ESC to quit)',resized_diff)
+
+                key = cv2.waitKey(25)
+
+                if key == ord("q") or key == 27:
+                    break
+
             if layer_func is not None:
                 if prev_frame is not None:
                     transformed = layer_func(transformed, prev_frame)
 
-                prev_frame = transformed[:]
-
-            # drop alpha layer of image
-            transformed = transformed[:, :, :3]
-
-            if playback:
-                resized_transformed = imutils.resize(transformed, width=min([frame_i.shape[0], 1000]))
-                playback_frame = resized_transformed
-
-                cv2.imshow('VidStab Playback ({} frame delay if using live video;'
-                           ' press Q or ESC to quit)'.format(min([smoothing_window,
-                                                                 max_frames])),
-                           playback_frame)
-                key = cv2.waitKey(1)
-
-                if key == ord("q") or key == 27:
-                    break
+            prev_frame = transformed[:] # this was within 'if layer_func is not None' condition
 
             if self.writer is None:
                 self._init_writer(output_path, transformed.shape[:2], output_fourcc,
@@ -300,15 +367,39 @@ class VidStab:
             # write frame to output video
             self.writer.write(transformed)
 
-        self.writer.release()
+            # h, w = transformed.shape[:2]
+
+            # # setup avg video writer
+            # self.avg_writer = cv2.VideoWriter(output_path[:-4]+'_averaged.avi',
+            #                               cv2.VideoWriter_fourcc(*output_fourcc),
+            #                               fps=int(self.vid_cap.get(cv2.CAP_PROP_FPS)), (w, h), True)
+
+            # # write frame to output video
+            # self.writer.write(transformed)
+
+        if self.writer is not None:
+            self.writer.release()
+        if live_video:
+            input_writer.release()
+        cv2.imwrite(output_path[:-4]+'_averaged.png',self.avg_transformed_frame/(i+1))
+        cv2.imwrite(output_path[:-4]+'_averaged_input.png',self.avg_input_frame/(i+1))
+
         if progress_bar:
             progress_bar.next()
             progress_bar.finish()
 
     def _gen_transforms(self, smoothing_window):
         self.trajectory = np.array(self._trajectory)
-        self.smoothed_trajectory = general_utils.bfill_rolling_mean(self.trajectory, n=smoothing_window)
-        self.transforms = np.array(self._raw_transforms) + (self.smoothed_trajectory - self.trajectory)
+        # self.smoothed_trajectory = np.array(self._trajectory)
+        # self.transforms = (-1.0)*np.array(self._raw_transforms) + (self.smoothed_trajectory - self.trajectory)            
+
+        if self.stab_algo == 'mean':
+            self.smoothed_trajectory = general_utils.bfill_rolling_mean(self.trajectory, n=smoothing_window)
+            self.transforms = np.array(self._raw_transforms) + (self.smoothed_trajectory - self.trajectory)            
+        elif self.stab_algo == 'raw':
+            self.smoothed_trajectory = np.array(self._trajectory)
+            self.transforms = (-1.0)*np.array(self._raw_transforms) + (self.smoothed_trajectory - self.trajectory)  
+        print("_gen_transforms::transforms:", self.transforms)
 
     def gen_transforms(self, input_path, smoothing_window=30, show_progress=True):
         """Generate stabilizing transforms for a video
@@ -421,7 +512,11 @@ class VidStab:
             self.auto_border_flag = True
 
         self.vid_cap = cv2.VideoCapture(input_path)
+        print("input path: ",input_path)
         frame_count = int(self.vid_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print("frame count: ",frame_count)
+
+        # smoothing_window = frame_count-1
 
         # wait for camera to start up
         if isinstance(input_path, int):
