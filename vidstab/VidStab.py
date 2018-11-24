@@ -57,7 +57,7 @@ class VidStab:
     :ivar transforms: a 2d numpy array storing the transformations used from frame to frame
     """
 
-    def __init__(self, kp_method='GFTT', stab_algo='mean', *args, **kwargs):
+    def __init__(self, kp_method='GFTT', stab_algo='mean', scale=False, *args, **kwargs):
         """instantiate VidStab class
 
         :param kp_method: String of the type of keypoint detector to use. Available options are:
@@ -80,6 +80,7 @@ class VidStab:
             self.kp_detector = kp_factory.FeatureDetector_create(kp_method, *args, **kwargs)
 
         self.stab_algo = stab_algo
+        self.scale = scale
 
         self._smoothing_window = None
         self._raw_transforms = []
@@ -127,7 +128,10 @@ class VidStab:
                 self._raw_transforms.append(transform[:])
             else:
                 # gen cumsum for new row and append
-                self._raw_transforms.append([self._raw_transforms[-1][j] + x for j, x in enumerate(transform)])
+                _curr_raw_transform = [self._raw_transforms[-1][j] + x for j, x in enumerate(transform[:3])]
+                _curr_raw_transform.append(self._raw_transforms[-1][3]*transform[3])
+                self._raw_transforms.append(_curr_raw_transform)
+            print("_update_raw_transform::_raw_transforms:",self._raw_transforms[-1])
 
     def _set_extreme_corners(self, frame):
         h, w = frame.shape[:2]
@@ -175,7 +179,7 @@ class VidStab:
                                                 self.prev_kps, None)
 
         matched_keypoints = vidstab_utils.match_keypoints(optical_flow, self.prev_kps)
-        transform_i = vidstab_utils.estimate_partial_transform(matched_keypoints)
+        transform_i = vidstab_utils.estimate_partial_transform(matched_keypoints,scale=self.scale)
 
         # update previous frame info for next iteration
         self._update_prev_frame(current_frame_gray)
@@ -303,7 +307,7 @@ class VidStab:
 
             bordered_frame, border_mode = vidstab_utils.border_frame(frame_i, border_size, border_type)
 
-            print("\ntransform:\n",transform)
+            print("\n_apply_transforms::transform:\n",transform)
             transformed = cv2.warpAffine(bordered_frame,
                                          transform,
                                          bordered_frame.shape[:2][::-1],

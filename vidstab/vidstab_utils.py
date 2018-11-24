@@ -10,10 +10,10 @@ def build_transformation_matrix(transform):
     """
     transform_matrix = np.zeros((2, 3))
 
-    transform_matrix[0, 0] = np.cos(transform[2])
-    transform_matrix[0, 1] = -np.sin(transform[2])
-    transform_matrix[1, 0] = np.sin(transform[2])
-    transform_matrix[1, 1] = np.cos(transform[2])
+    transform_matrix[0, 0] = np.cos(transform[2])*transform[3]*(-1.0)
+    transform_matrix[0, 1] = -np.sin(transform[2])*transform[3]*(-1.0)
+    transform_matrix[1, 0] = np.sin(transform[2])*transform[3]*(-1.0)
+    transform_matrix[1, 1] = np.cos(transform[2])*transform[3]*(-1.0)
     transform_matrix[0, 2] = transform[0]
     transform_matrix[1, 2] = transform[1]
 
@@ -70,7 +70,7 @@ def match_keypoints(optical_flow, prev_kps):
     return cur_matched_kp, prev_matched_kp
 
 
-def estimate_partial_transform(matched_keypoints):
+def estimate_partial_transform(matched_keypoints,scale=False):
     """Wrapper of cv2.estimateRigidTransform for convenience in vidstab process
 
     :param matched_keypoints: output of match_keypoints util function; tuple of (cur_matched_kp, prev_matched_kp)
@@ -81,6 +81,7 @@ def estimate_partial_transform(matched_keypoints):
     transform = cv2.estimateRigidTransform(np.array(prev_matched_kp),
                                            np.array(cur_matched_kp),
                                            False)
+    print("estimateRigidTransform::transform:\n",transform)
     if transform is not None:
         # translation x
         dx = transform[0, 2]
@@ -88,7 +89,13 @@ def estimate_partial_transform(matched_keypoints):
         dy = transform[1, 2]
         # rotation
         da = np.arctan2(transform[1, 0], transform[0, 0])
+        if scale:
+            # scale
+            s = transform[0,0]/np.cos(da)
+        else:
+            s = 1.0
     else:
         dx = dy = da = 0
+        s = 1.0
 
-    return [dx, dy, da]
+    return [dx, dy, da, s]
